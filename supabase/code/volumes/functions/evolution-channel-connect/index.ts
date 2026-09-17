@@ -18,9 +18,6 @@ const corsHeaders = {
 type ConnectPayload = {
   action?: 'start' | 'status';
   name?: string;
-  url?: string;
-  instance?: string;
-  apiKey?: string;
   channelId?: string;
 };
 
@@ -104,6 +101,40 @@ function validateInstance(value: string): string {
     );
   }
   return instance;
+}
+
+function createManagedInstanceName(tenantId: string, channelName: string): string {
+  const tenantPart = tenantId.replace(/-/g, '').slice(0, 10).toLowerCase();
+  const namePart = channelName
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48) || 'whatsapp';
+  return validateInstance(`crm-${tenantPart}-${namePart}`.slice(0, 80));
+}
+
+function getManagedEvolutionConfig(): { url: string; apiKey: string } {
+  const apiKey = String(
+    Deno.env.get('EVOLUTION_API_KEY') ||
+      Deno.env.get('AUTHENTICATION_API_KEY') ||
+      '',
+  ).trim();
+  if (!apiKey) {
+    throw new HttpError(
+      500,
+      'SERVER_CONFIGURATION_ERROR',
+      'A conexão automática da Evolution ainda não foi configurada no servidor.',
+    );
+  }
+  const url = normalizeEvolutionUrl(
+    String(
+      Deno.env.get('EVOLUTION_API_URL') ||
+        `https://${DEFAULT_EVOLUTION_HOST}`,
+    ).trim(),
+  );
+  return { url, apiKey };
 }
 
 function validateUuid(value: unknown): string {
@@ -562,9 +593,6 @@ async function handleRequest(request: Request): Promise<Response> {
     }
 
     const name = String(payload?.name || '').trim();
-    const apiKey = String(payload?.apiKey || '').trim();
-    const evolutionUrl = normalizeEvolutionUrl(String(payload?.url || ''));
-    const instance = validateInstance(String(payload?.instance || ''));
 
     if (!name || name.length > 120) {
       throw new HttpError(
@@ -573,13 +601,8 @@ async function handleRequest(request: Request): Promise<Response> {
         'Informe um nome válido para o canal.',
       );
     }
-    if (!apiKey || apiKey.length > 500) {
-      throw new HttpError(
-        400,
-        'INVALID_API_KEY',
-        'Informe a API key da Evolution.',
-      );
-    }
+    const { url: evolutionUrl, apiKey } = getManagedEvolutionConfig();
+    const instance = createManagedInstanceName(tenantId, name);
 
     const currentState = await readEvolutionState(
       evolutionUrl,

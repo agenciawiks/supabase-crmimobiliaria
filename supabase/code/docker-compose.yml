@@ -434,6 +434,9 @@ services:
       SUPABASE_PUBLISHABLE_KEYS: "{\"default\":\"${SUPABASE_PUBLISHABLE_KEY:-}\"}"
       SUPABASE_SECRET_KEYS: "{\"default\":\"${SUPABASE_SECRET_KEY:-}\"}"
       SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+      # The Evolution credential stays server-side; the CRM never receives it.
+      EVOLUTION_API_URL: ${EVOLUTION_API_URL:-https://n8n-evolution-api.rh3fr2.easypanel.host}
+      EVOLUTION_API_KEY: ${EVOLUTION_API_KEY:-}
       # TODO: Allow configuring VERIFY_JWT per function.
       VERIFY_JWT: "${FUNCTIONS_VERIFY_JWT}"
     command: [ "start", "--main-service", "/home/deno/functions/main" ]
