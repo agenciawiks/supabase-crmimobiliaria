@@ -6,7 +6,7 @@ const WEBHOOK_URL =
   'https://n8n-n8n.rh3fr2.easypanel.host/webhook/evolution-prod';
 const DEFAULT_EVOLUTION_HOST =
   'n8n-evolution-api.rh3fr2.easypanel.host';
-const REQUEST_TIMEOUT_MS = 4_000;
+const REQUEST_TIMEOUT_MS = 7_000;
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
