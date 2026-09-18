@@ -6,7 +6,7 @@ const WEBHOOK_URL =
   'https://n8n-n8n.rh3fr2.easypanel.host/webhook/evolution-prod';
 const DEFAULT_EVOLUTION_HOST =
   'n8n-evolution-api.rh3fr2.easypanel.host';
-const REQUEST_TIMEOUT_MS = 5_000;
+const REQUEST_TIMEOUT_MS = 4_000;
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -461,6 +461,7 @@ async function saveChannel(
     instance: string;
     apiKey: string;
     status: string;
+    webhookConfigured: boolean;
   },
 ): Promise<JsonRecord> {
   const channelValues = {
@@ -471,7 +472,7 @@ async function saveChannel(
     url: values.url,
     instance: values.instance,
     api_key: values.apiKey,
-    webhook_url: WEBHOOK_URL,
+    webhook_url: values.webhookConfigured ? WEBHOOK_URL : '',
     updated_at: new Date().toISOString(),
   };
 
@@ -617,25 +618,34 @@ async function handleRequest(request: Request): Promise<Response> {
 
       const evolutionUrl = normalizeEvolutionUrl(String(channel.url || ''));
       const instance = validateInstance(String(channel.instance || ''));
-      const stateResult = await readEvolutionState(
-        evolutionUrl,
-        apiKey,
-        instance,
-      );
-      const connected = stateResult.state === 'open';
-      const qrCode = connected
+      const needsWebhook = normalizeWebhookUrl(channel.webhook_url) !==
+        normalizeWebhookUrl(WEBHOOK_URL);
+      const [stateResult, qrResult, webhookResult] = await Promise.allSettled([
+        readEvolutionState(evolutionUrl, apiKey, instance),
+        readQrCodeFromEvolution(evolutionUrl, apiKey, instance),
+        needsWebhook
+          ? ensureEvolutionWebhook(evolutionUrl, apiKey, instance)
+          : Promise.resolve(),
+      ]);
+
+      if (stateResult.status === 'rejected') throw stateResult.reason;
+
+      const providerConnected = stateResult.value.state === 'open';
+      const qrCode = providerConnected || qrResult.status === 'rejected'
         ? null
-        : await readQrCodeFromEvolution(evolutionUrl, apiKey, instance);
-
-      if (normalizeWebhookUrl(channel.webhook_url) !== normalizeWebhookUrl(WEBHOOK_URL)) {
-        await ensureEvolutionWebhook(evolutionUrl, apiKey, instance);
-      }
-
+        : qrResult.value;
+      const webhookConfigured = !needsWebhook || webhookResult.status === 'fulfilled';
+      const connected = providerConnected && webhookConfigured;
       const nextStatus = connected ? 'connected' : 'disconnected';
-      if (channel.status !== nextStatus || normalizeWebhookUrl(channel.webhook_url) !== normalizeWebhookUrl(WEBHOOK_URL)) {
+      if (channel.status !== nextStatus || (needsWebhook && webhookConfigured)) {
+        const updateValues: JsonRecord = {
+          status: nextStatus,
+          updated_at: new Date().toISOString(),
+        };
+        if (webhookConfigured) updateValues.webhook_url = WEBHOOK_URL;
         await supabase
           .from('channels')
-          .update({ status: nextStatus, webhook_url: WEBHOOK_URL, updated_at: new Date().toISOString() })
+          .update(updateValues)
           .eq('id', channel.id)
           .eq('tenant_id', tenantId);
       }
@@ -645,12 +655,14 @@ async function handleRequest(request: Request): Promise<Response> {
         action,
         channelId: channel.id,
         connected,
-        state: stateResult.state,
+        state: stateResult.value.state,
         qrCode,
-        webhookConfigured: true,
+        webhookConfigured,
         webhookUrl: WEBHOOK_URL,
         message: connected
           ? 'WhatsApp conectado. O canal está pronto para receber mensagens.'
+          : providerConnected
+            ? 'WhatsApp conectado. Finalizando a configuração automática do webhook.'
           : qrCode
             ? 'Aguardando a leitura do QR Code pelo WhatsApp.'
             : 'A instância está aguardando conexão. Atualize o QR Code para tentar novamente.',
@@ -679,41 +691,36 @@ async function handleRequest(request: Request): Promise<Response> {
       instance,
     );
 
-    // Configure and verify the inbound route before returning anything to the
-    // browser. This prevents a QR from being shown for a channel that cannot
-    // mirror messages back to the CRM.
-    await ensureEvolutionWebhook(evolutionUrl, apiKey, instance);
-
     const creationState = readConnectionState(creationBody);
-    const connected = creationState === 'open';
-    const qrCode = connected ? null : readQrCode(creationBody);
-    const status = connected ? 'connected' : 'disconnected';
+    const providerConnected = creationState === 'open';
+    const qrCode = providerConnected ? null : readQrCode(creationBody);
     const channel = await saveChannel(supabase, tenantId, {
       name,
       url: evolutionUrl,
       instance,
       apiKey,
-      status,
+      status: 'disconnected',
+      webhookConfigured: false,
     });
 
     return jsonResponse({
       success: true,
       action: 'start',
-      connected,
+      connected: false,
       state: creationState === 'unknown' ? 'connecting' : creationState,
       qrCode,
       channelId: channel.id,
-      webhookConfigured: true,
+      webhookConfigured: false,
       webhookUrl: WEBHOOK_URL,
       channel: {
         ...channel,
         api_key: undefined,
       },
-      message: connected
-        ? 'Evolution API conectada e webhook configurado.'
+      message: providerConnected
+        ? 'WhatsApp conectado. Finalizando a configuração automática do webhook.'
         : qrCode
-          ? 'Instância criada. Leia o QR Code para concluir a conexão.'
-          : 'Instância criada e webhook configurado. O QR Code ainda não está disponível; atualize para tentar novamente.',
+          ? 'Instância criada. Leia o QR Code enquanto o webhook é configurado automaticamente.'
+          : 'Instância criada. O QR Code e o webhook serão sincronizados automaticamente.',
     });
   } catch (error) {
     if (error instanceof HttpError) {
