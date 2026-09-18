@@ -167,6 +167,61 @@ function validateUuid(value: unknown): string {
   return uuid;
 }
 
+function decodeBase64Url(value: string): Uint8Array {
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
+  const binary = atob(padded);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+async function resolveAuthenticatedUserId(
+  supabase: ReturnType<typeof createClient>,
+  accessToken: string,
+): Promise<string> {
+  const parts = accessToken.split('.');
+  if (parts.length !== 3) {
+    throw new HttpError(401, 'UNAUTHENTICATED', 'Sua sessão expirou. Faça login novamente.');
+  }
+
+  try {
+    const header = JSON.parse(new TextDecoder().decode(decodeBase64Url(parts[0]))) as JsonRecord;
+    const payload = JSON.parse(new TextDecoder().decode(decodeBase64Url(parts[1]))) as JsonRecord;
+    const secret = String(Deno.env.get('JWT_SECRET') || '').trim();
+
+    if (header.alg === 'HS256' && secret) {
+      const key = await crypto.subtle.importKey(
+        'raw',
+        new TextEncoder().encode(secret),
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['verify'],
+      );
+      const signatureIsValid = await crypto.subtle.verify(
+        'HMAC',
+        key,
+        decodeBase64Url(parts[2]),
+        new TextEncoder().encode(`${parts[0]}.${parts[1]}`),
+      );
+      if (!signatureIsValid) throw new Error('invalid signature');
+    } else if (!secret) {
+      const { data: { user }, error } = await supabase.auth.getUser(accessToken);
+      if (error || !user) throw new Error('invalid session');
+      return user.id;
+    } else {
+      throw new Error('unsupported token algorithm');
+    }
+
+    const expiresAt = Number(payload.exp || 0);
+    const userId = String(payload.sub || '').trim();
+    if (!userId || (expiresAt > 0 && expiresAt <= Math.floor(Date.now() / 1000))) {
+      throw new Error('expired session');
+    }
+    return userId;
+  } catch {
+    throw new HttpError(401, 'UNAUTHENTICATED', 'Sua sessão expirou. Faça login novamente.');
+  }
+}
+
 async function evolutionRequest(
   url: string,
   apiKey: string,
@@ -285,19 +340,9 @@ async function resolveAuthorizedTenant(
     );
   }
 
-  const { data: tenant, error: tenantError } = await supabase
-    .from('tenants')
-    .select('id')
-    .eq('id', tenantId)
-    .maybeSingle();
-  if (tenantError || !tenant) {
-    throw new HttpError(
-      404,
-      'TENANT_NOT_FOUND',
-      'O cliente selecionado não foi encontrado.',
-    );
-  }
-
+  // The channel/profile queries below enforce the tenant scope. Avoiding a
+  // second tenant round-trip keeps this short-lived connection endpoint
+  // within the self-hosted Edge runtime budget.
   return tenantId;
 }
 
@@ -582,25 +627,14 @@ async function handleRequest(request: Request): Promise<Response> {
     const supabase = createClient(supabaseUrl, serviceRoleKey, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser(accessToken);
-
-    if (authError || !user) {
-      throw new HttpError(
-        401,
-        'UNAUTHENTICATED',
-        'Sua sessão expirou. Faça login novamente.',
-      );
-    }
+    const userId = await resolveAuthenticatedUserId(supabase, accessToken);
 
     const payload = (await request.json().catch(() => null)) as
       | ConnectPayload
       | null;
     const tenantId = await resolveAuthorizedTenant(
       supabase,
-      user.id,
+      userId,
       payload?.tenantId,
     );
     const action = payload?.action || 'start';
