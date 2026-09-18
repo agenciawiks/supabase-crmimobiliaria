@@ -629,16 +629,29 @@ async function handleRequest(request: Request): Promise<Response> {
         );
       }
 
-      const apiKey = String(channel.api_key || '').trim();
-      if (!apiKey) {
-        throw new HttpError(
-          422,
-          'CHANNEL_CREDENTIALS_MISSING',
-          'A credencial da instância não está disponível no CRM.',
-        );
+      // Managed channels must always use the server-side Evolution
+      // credential. The key persisted on an older channel can be stale after
+      // a VPS migration, while the global credential is the one that created
+      // the instance and is still valid for webhook operations.
+      let evolutionUrl: string;
+      let apiKey: string;
+      try {
+        const managedConfig = getManagedEvolutionConfig();
+        evolutionUrl = managedConfig.url;
+        apiKey = managedConfig.apiKey;
+      } catch {
+        const storedApiKey = String(channel.api_key || '').trim();
+        if (!storedApiKey) {
+          throw new HttpError(
+            422,
+            'CHANNEL_CREDENTIALS_MISSING',
+            'A credencial da instância não está disponível no CRM.',
+          );
+        }
+        evolutionUrl = normalizeEvolutionUrl(String(channel.url || ''));
+        apiKey = storedApiKey;
       }
 
-      const evolutionUrl = normalizeEvolutionUrl(String(channel.url || ''));
       const instance = validateInstance(String(channel.instance || ''));
       // A URL stored in the database does not prove the provider still has
       // the webhook enabled (instances can be reset independently). Reapply
