@@ -6,7 +6,7 @@ const WEBHOOK_URL =
   'https://n8n-n8n.rh3fr2.easypanel.host/webhook/evolution-prod';
 const DEFAULT_EVOLUTION_HOST =
   'n8n-evolution-api.rh3fr2.easypanel.host';
-const REQUEST_TIMEOUT_MS = 12_000;
+const REQUEST_TIMEOUT_MS = 5_000;
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -351,7 +351,7 @@ async function createEvolutionInstance(
   evolutionUrl: string,
   apiKey: string,
   instance: string,
-): Promise<void> {
+): Promise<JsonRecord | null> {
   const result = await evolutionRequest(
     `${evolutionUrl}/instance/create`,
     apiKey,
@@ -374,6 +374,8 @@ async function createEvolutionInstance(
       'A Evolution API não conseguiu criar a instância.',
     );
   }
+
+  return result.body;
 }
 
 async function readQrCodeFromEvolution(
@@ -430,25 +432,15 @@ async function ensureEvolutionWebhook(
     );
   }
 
-  const verifyResult = await evolutionRequest(
-    `${evolutionUrl}/webhook/find/${encodeURIComponent(instance)}`,
-    apiKey,
-  );
-  if (!verifyResult.response.ok) {
-    evolutionFailure(
-      verifyResult.response.status,
-      'Não foi possível confirmar o webhook configurado.',
-    );
-  }
-
-  const verifyBody = verifyResult.body || {};
+  const responseBody = webhookResult.body || {};
   const webhookConfig =
-    (verifyBody.webhook as JsonRecord | undefined) || verifyBody;
-  const configuredUrl = normalizeWebhookUrl(webhookConfig.url);
-  if (
-    webhookConfig.enabled === false ||
-    configuredUrl !== normalizeWebhookUrl(WEBHOOK_URL)
-  ) {
+    (responseBody.webhook as JsonRecord | undefined) || responseBody;
+  const returnedUrl = webhookConfig.url
+    ? normalizeWebhookUrl(webhookConfig.url)
+    : null;
+  if (webhookConfig.enabled === false || (
+    returnedUrl && returnedUrl !== normalizeWebhookUrl(WEBHOOK_URL)
+  )) {
     throw new HttpError(
       502,
       'WEBHOOK_VERIFICATION_FAILED',
@@ -678,31 +670,20 @@ async function handleRequest(request: Request): Promise<Response> {
     const { url: evolutionUrl, apiKey } = getManagedEvolutionConfig();
     const instance = createManagedInstanceName(tenantId, name);
 
-    const currentState = await readEvolutionState(
+    const creationBody = await createEvolutionInstance(
       evolutionUrl,
       apiKey,
       instance,
-      true,
     );
-    if (currentState.state === 'not_found') {
-      await createEvolutionInstance(evolutionUrl, apiKey, instance);
-    }
 
     // Configure and verify the inbound route before returning anything to the
     // browser. This prevents a QR from being shown for a channel that cannot
     // mirror messages back to the CRM.
     await ensureEvolutionWebhook(evolutionUrl, apiKey, instance);
 
-    const stateAfterCreate = await readEvolutionState(
-      evolutionUrl,
-      apiKey,
-      instance,
-      true,
-    );
-    const connected = stateAfterCreate.state === 'open';
-    const qrCode = connected
-      ? null
-      : await readQrCodeFromEvolution(evolutionUrl, apiKey, instance);
+    const creationState = readConnectionState(creationBody);
+    const connected = creationState === 'open';
+    const qrCode = connected ? null : readQrCode(creationBody);
     const status = connected ? 'connected' : 'disconnected';
     const channel = await saveChannel(supabase, tenantId, {
       name,
@@ -716,7 +697,7 @@ async function handleRequest(request: Request): Promise<Response> {
       success: true,
       action: 'start',
       connected,
-      state: stateAfterCreate.state,
+      state: creationState === 'unknown' ? 'connecting' : creationState,
       qrCode,
       channelId: channel.id,
       webhookConfigured: true,
