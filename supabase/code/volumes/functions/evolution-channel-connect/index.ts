@@ -451,6 +451,10 @@ async function ensureEvolutionWebhook(
     timeoutMs,
   );
   if (!webhookResult.response.ok) {
+    console.error('[evolution-channel-connect] webhook provider response', {
+      status: webhookResult.response.status,
+      body: webhookResult.body,
+    });
     evolutionFailure(
       webhookResult.response.status,
       'A Evolution API recusou a configuração do webhook.',
