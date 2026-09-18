@@ -419,7 +419,7 @@ async function ensureEvolutionWebhook(
           'CONNECTION_UPDATE',
           'MESSAGES_UPSERT',
           'MESSAGES_UPDATE',
-          'SEND_MESSAGE_UPDATE',
+          'SEND_MESSAGE',
           'GROUPS_UPSERT',
           'GROUP_UPDATE',
           'GROUP_PARTICIPANTS_UPDATE',
