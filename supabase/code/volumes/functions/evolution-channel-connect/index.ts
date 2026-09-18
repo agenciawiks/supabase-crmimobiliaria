@@ -368,7 +368,10 @@ async function createEvolutionInstance(
   // Evolution returns 4xx when the instance already exists. In that case we
   // reuse it and continue with webhook/QR synchronization instead of creating
   // a duplicate connection.
-  if (!result.response.ok && ![400, 409].includes(result.response.status)) {
+  // Evolution 2.3.x may answer 403 when an instance name is already in use.
+  // Reuse it here; the subsequent webhook request still validates the global
+  // credential and will reject a genuinely unauthorized request.
+  if (!result.response.ok && ![400, 403, 409].includes(result.response.status)) {
     evolutionFailure(
       result.response.status,
       'A Evolution API não conseguiu criar a instância.',
