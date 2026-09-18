@@ -7,6 +7,7 @@ const WEBHOOK_URL =
 const DEFAULT_EVOLUTION_HOST =
   'n8n-evolution-api.rh3fr2.easypanel.host';
 const REQUEST_TIMEOUT_MS = 7_000;
+const STATUS_REQUEST_TIMEOUT_MS = 4_000;
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -158,11 +159,12 @@ async function evolutionRequest(
   url: string,
   apiKey: string,
   init: RequestInit = {},
+  timeoutMs = REQUEST_TIMEOUT_MS,
 ): Promise<{ response: Response; body: JsonRecord | null }> {
   const controller = new AbortController();
   const timeout = setTimeout(
     () => controller.abort(),
-    REQUEST_TIMEOUT_MS,
+    timeoutMs,
   );
 
   try {
@@ -330,10 +332,13 @@ async function readEvolutionState(
   apiKey: string,
   instance: string,
   allowMissing = false,
+  timeoutMs = REQUEST_TIMEOUT_MS,
 ): Promise<{ state: string; body: JsonRecord | null }> {
   const result = await evolutionRequest(
     `${evolutionUrl}/instance/connectionState/${encodeURIComponent(instance)}`,
     apiKey,
+    {},
+    timeoutMs,
   );
   if (!result.response.ok) {
     if (allowMissing && result.response.status === 404) {
@@ -385,10 +390,13 @@ async function readQrCodeFromEvolution(
   evolutionUrl: string,
   apiKey: string,
   instance: string,
+  timeoutMs = REQUEST_TIMEOUT_MS,
 ): Promise<string | null> {
   const result = await evolutionRequest(
     `${evolutionUrl}/instance/connect/${encodeURIComponent(instance)}`,
     apiKey,
+    {},
+    timeoutMs,
   );
   if (!result.response.ok) {
     if ([404, 409].includes(result.response.status)) return null;
@@ -404,6 +412,7 @@ async function ensureEvolutionWebhook(
   evolutionUrl: string,
   apiKey: string,
   instance: string,
+  timeoutMs = REQUEST_TIMEOUT_MS,
 ): Promise<void> {
   const webhookResult = await evolutionRequest(
     `${evolutionUrl}/webhook/set/${encodeURIComponent(instance)}`,
@@ -427,6 +436,7 @@ async function ensureEvolutionWebhook(
         headers: {},
       }),
     },
+    timeoutMs,
   );
   if (!webhookResult.response.ok) {
     evolutionFailure(
@@ -623,9 +633,9 @@ async function handleRequest(request: Request): Promise<Response> {
       // and verify it on every status check so existing channels self-heal.
       const needsWebhook = true;
       const [stateResult, qrResult, webhookResult] = await Promise.allSettled([
-        readEvolutionState(evolutionUrl, apiKey, instance),
-        readQrCodeFromEvolution(evolutionUrl, apiKey, instance),
-        ensureEvolutionWebhook(evolutionUrl, apiKey, instance),
+        readEvolutionState(evolutionUrl, apiKey, instance, false, STATUS_REQUEST_TIMEOUT_MS),
+        readQrCodeFromEvolution(evolutionUrl, apiKey, instance, STATUS_REQUEST_TIMEOUT_MS),
+        ensureEvolutionWebhook(evolutionUrl, apiKey, instance, STATUS_REQUEST_TIMEOUT_MS),
       ]);
 
       if (stateResult.status === 'rejected') throw stateResult.reason;
