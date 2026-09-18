@@ -135,13 +135,9 @@ function getManagedEvolutionConfig(): { url: string; apiKey: string } {
       Deno.env.get('AUTHENTICATION_API_KEY') ||
       '',
   ).trim();
-  if (!apiKey) {
-    throw new HttpError(
-      500,
-      'SERVER_CONFIGURATION_ERROR',
-      'A conexão automática da Evolution ainda não foi configurada no servidor.',
-    );
-  }
+  // The self-hosted Evolution service may run with authentication disabled.
+  // In that mode the provider accepts the request without an apikey; when a
+  // key is configured, evolutionRequest sends it transparently.
   const url = normalizeEvolutionUrl(
     String(
       Deno.env.get('EVOLUTION_API_URL') ||
@@ -239,7 +235,7 @@ async function evolutionRequest(
       ...init,
       signal: controller.signal,
       headers: {
-        apikey: apiKey,
+        ...(apiKey ? { apikey: apiKey } : {}),
         Accept: 'application/json',
         ...(init.body ? { 'Content-Type': 'application/json' } : {}),
         ...(init.headers || {}),
