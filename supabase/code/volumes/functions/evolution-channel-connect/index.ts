@@ -243,15 +243,19 @@ async function resolveAuthorizedTenant(
     );
   }
 
-  const profileTenantId = profile.tenant_id
+  const isSuperAdmin = profile.is_super_admin === true;
+  const requestedTenant = requestedTenantId
+    ? validateUuid(requestedTenantId)
+    : null;
+  const profileTenantId = !isSuperAdmin && profile.tenant_id
     ? validateUuid(profile.tenant_id)
     : null;
-  let tenantId: string;
-  if (requestedTenantId) {
-    tenantId = validateUuid(requestedTenantId);
-  } else if (profileTenantId) {
-    tenantId = profileTenantId;
-  } else {
+
+  const tenantId = isSuperAdmin
+    ? requestedTenant
+    : requestedTenant ?? profileTenantId;
+
+  if (!tenantId) {
     throw new HttpError(
       403,
       'TENANT_REQUIRED',
@@ -259,10 +263,7 @@ async function resolveAuthorizedTenant(
     );
   }
 
-  if (
-    profile.is_super_admin !== true &&
-    (!profileTenantId || tenantId !== profileTenantId)
-  ) {
+  if (!isSuperAdmin && tenantId !== profileTenantId) {
     throw new HttpError(
       403,
       'TENANT_ACCESS_DENIED',
