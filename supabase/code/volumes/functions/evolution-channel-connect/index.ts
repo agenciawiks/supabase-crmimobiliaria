@@ -7,7 +7,11 @@ const WEBHOOK_URL =
 const DEFAULT_EVOLUTION_HOST =
   'n8n-evolution-api.rh3fr2.easypanel.host';
 const REQUEST_TIMEOUT_MS = 7_000;
-const STATUS_REQUEST_TIMEOUT_MS = 2_000;
+// Status polling must stay bounded, but the Evolution webhook endpoint may
+// need a little more time than the connection-state endpoint.  Keeping both
+// calls under the local Edge runtime budget prevents a stuck provider request
+// from terminating the whole isolate.
+const STATUS_REQUEST_TIMEOUT_MS = 4_000;
 
 type EdgeRuntimeLike = {
   waitUntil?: (promise: Promise<unknown>) => void;
@@ -639,50 +643,34 @@ async function handleRequest(request: Request): Promise<Response> {
       // A URL stored in the database does not prove the provider still has
       // the webhook enabled (instances can be reset independently). Reapply
       // and verify it on every status check so existing channels self-heal.
+      // Do not call /instance/connect here: that endpoint can hold the
+      // request open while waiting for a new QR code and used to terminate
+      // this Edge isolate before the webhook request completed. The QR code
+      // is returned by the start action; this status path only checks state.
       const needsWebhook = true;
-      const [stateResult, qrResult] = await Promise.allSettled([
-        readEvolutionState(evolutionUrl, apiKey, instance, false, STATUS_REQUEST_TIMEOUT_MS),
-        readQrCodeFromEvolution(evolutionUrl, apiKey, instance, STATUS_REQUEST_TIMEOUT_MS),
+      const [stateResult, webhookResult] = await Promise.allSettled([
+        readEvolutionState(
+          evolutionUrl,
+          apiKey,
+          instance,
+          false,
+          STATUS_REQUEST_TIMEOUT_MS,
+        ),
+        ensureEvolutionWebhook(
+          evolutionUrl,
+          apiKey,
+          instance,
+          STATUS_REQUEST_TIMEOUT_MS,
+        ),
       ]);
 
       if (stateResult.status === 'rejected') throw stateResult.reason;
 
       const providerConnected = stateResult.value.state === 'open';
-      const qrCode = providerConnected || qrResult.status === 'rejected'
-        ? null
-        : qrResult.value;
-      const webhookPromise = ensureEvolutionWebhook(
-        evolutionUrl,
-        apiKey,
-        instance,
-        STATUS_REQUEST_TIMEOUT_MS,
-      ).then(async () => {
-        await supabase
-          .from('channels')
-          .update({
-            status: providerConnected ? 'connected' : 'disconnected',
-            webhook_url: WEBHOOK_URL,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', channel.id)
-          .eq('tenant_id', tenantId);
-      });
-      const storedWebhookUrl = String(channel.webhook_url || '').trim();
-      let webhookConfigured = Boolean(storedWebhookUrl) &&
-        normalizeWebhookUrl(storedWebhookUrl) === normalizeWebhookUrl(WEBHOOK_URL);
-      if (edgeRuntime?.waitUntil) {
-        edgeRuntime.waitUntil(webhookPromise.catch(() => undefined));
-      } else {
-        try {
-          await webhookPromise;
-          webhookConfigured = true;
-        } catch {
-          webhookConfigured = false;
-        }
-      }
-      // Existing channels already carry the intended routing URL in the DB;
-      // the provider is repaired asynchronously and verified by the next
-      // status poll. New channels remain disconnected until that succeeds.
+      const webhookConfigured = webhookResult.status === 'fulfilled';
+      // Existing channels are repaired synchronously here. This keeps the
+      // response truthful: a channel is only reported ready after Evolution
+      // confirms the webhook request, instead of trusting the DB URL alone.
       const connected = providerConnected && webhookConfigured;
       const nextStatus = connected ? 'connected' : 'disconnected';
       if (channel.status !== nextStatus || (needsWebhook && webhookConfigured)) {
@@ -704,16 +692,14 @@ async function handleRequest(request: Request): Promise<Response> {
         channelId: channel.id,
         connected,
         state: stateResult.value.state,
-        qrCode,
+        qrCode: null,
         webhookConfigured,
         webhookUrl: WEBHOOK_URL,
         message: connected
           ? 'WhatsApp conectado. O canal está pronto para receber mensagens.'
           : providerConnected
             ? 'WhatsApp conectado. Finalizando a configuração automática do webhook.'
-          : qrCode
-            ? 'Aguardando a leitura do QR Code pelo WhatsApp.'
-            : 'A instância está aguardando conexão. Atualize o QR Code para tentar novamente.',
+            : 'A instância está aguardando conexão. Leia o QR Code exibido no CRM.',
       });
     }
 
@@ -742,13 +728,31 @@ async function handleRequest(request: Request): Promise<Response> {
     const creationState = readConnectionState(creationBody);
     const providerConnected = creationState === 'open';
     const qrCode = providerConnected ? null : readQrCode(creationBody);
+
+    // Configure the provider before exposing the new channel. This is the
+    // critical path for first-time connections; if the provider is slow, we
+    // still persist the channel and the status poll will retry the same
+    // idempotent request.
+    let webhookConfigured = false;
+    try {
+      await ensureEvolutionWebhook(
+        evolutionUrl,
+        apiKey,
+        instance,
+        REQUEST_TIMEOUT_MS,
+      );
+      webhookConfigured = true;
+    } catch (error) {
+      console.error('[evolution-channel-connect] webhook setup failed', error);
+    }
+
     const channel = await saveChannel(supabase, tenantId, {
       name,
       url: evolutionUrl,
       instance,
       apiKey,
       status: 'disconnected',
-      webhookConfigured: false,
+      webhookConfigured,
     });
 
     return jsonResponse({
@@ -758,16 +762,20 @@ async function handleRequest(request: Request): Promise<Response> {
       state: creationState === 'unknown' ? 'connecting' : creationState,
       qrCode,
       channelId: channel.id,
-      webhookConfigured: false,
+      webhookConfigured,
       webhookUrl: WEBHOOK_URL,
       channel: {
         ...channel,
         api_key: undefined,
       },
       message: providerConnected
-        ? 'WhatsApp conectado. Finalizando a configuração automática do webhook.'
+        ? webhookConfigured
+          ? 'WhatsApp conectado. O webhook foi ativado automaticamente.'
+          : 'WhatsApp conectado. Finalizando a configuração automática do webhook.'
         : qrCode
-          ? 'Instância criada. Leia o QR Code enquanto o webhook é configurado automaticamente.'
+          ? webhookConfigured
+            ? 'Instância criada. Leia o QR Code; o webhook já está ativo.'
+            : 'Instância criada. Leia o QR Code enquanto o webhook é configurado automaticamente.'
           : 'Instância criada. O QR Code e o webhook serão sincronizados automaticamente.',
     });
   } catch (error) {
