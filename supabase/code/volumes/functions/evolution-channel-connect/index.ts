@@ -7,7 +7,15 @@ const WEBHOOK_URL =
 const DEFAULT_EVOLUTION_HOST =
   'n8n-evolution-api.rh3fr2.easypanel.host';
 const REQUEST_TIMEOUT_MS = 7_000;
-const STATUS_REQUEST_TIMEOUT_MS = 4_000;
+const STATUS_REQUEST_TIMEOUT_MS = 2_000;
+
+type EdgeRuntimeLike = {
+  waitUntil?: (promise: Promise<unknown>) => void;
+};
+
+const edgeRuntime = (globalThis as typeof globalThis & {
+  EdgeRuntime?: EdgeRuntimeLike;
+}).EdgeRuntime;
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -632,10 +640,9 @@ async function handleRequest(request: Request): Promise<Response> {
       // the webhook enabled (instances can be reset independently). Reapply
       // and verify it on every status check so existing channels self-heal.
       const needsWebhook = true;
-      const [stateResult, qrResult, webhookResult] = await Promise.allSettled([
+      const [stateResult, qrResult] = await Promise.allSettled([
         readEvolutionState(evolutionUrl, apiKey, instance, false, STATUS_REQUEST_TIMEOUT_MS),
         readQrCodeFromEvolution(evolutionUrl, apiKey, instance, STATUS_REQUEST_TIMEOUT_MS),
-        ensureEvolutionWebhook(evolutionUrl, apiKey, instance, STATUS_REQUEST_TIMEOUT_MS),
       ]);
 
       if (stateResult.status === 'rejected') throw stateResult.reason;
@@ -644,7 +651,38 @@ async function handleRequest(request: Request): Promise<Response> {
       const qrCode = providerConnected || qrResult.status === 'rejected'
         ? null
         : qrResult.value;
-      const webhookConfigured = webhookResult.status === 'fulfilled';
+      const webhookPromise = ensureEvolutionWebhook(
+        evolutionUrl,
+        apiKey,
+        instance,
+        STATUS_REQUEST_TIMEOUT_MS,
+      ).then(async () => {
+        await supabase
+          .from('channels')
+          .update({
+            status: providerConnected ? 'connected' : 'disconnected',
+            webhook_url: WEBHOOK_URL,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', channel.id)
+          .eq('tenant_id', tenantId);
+      });
+      const storedWebhookUrl = String(channel.webhook_url || '').trim();
+      let webhookConfigured = Boolean(storedWebhookUrl) &&
+        normalizeWebhookUrl(storedWebhookUrl) === normalizeWebhookUrl(WEBHOOK_URL);
+      if (edgeRuntime?.waitUntil) {
+        edgeRuntime.waitUntil(webhookPromise.catch(() => undefined));
+      } else {
+        try {
+          await webhookPromise;
+          webhookConfigured = true;
+        } catch {
+          webhookConfigured = false;
+        }
+      }
+      // Existing channels already carry the intended routing URL in the DB;
+      // the provider is repaired asynchronously and verified by the next
+      // status poll. New channels remain disconnected until that succeeds.
       const connected = providerConnected && webhookConfigured;
       const nextStatus = connected ? 'connected' : 'disconnected';
       if (channel.status !== nextStatus || (needsWebhook && webhookConfigured)) {
