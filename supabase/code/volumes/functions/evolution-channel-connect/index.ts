@@ -243,12 +243,26 @@ async function resolveAuthorizedTenant(
     );
   }
 
-  const profileTenantId = validateUuid(profile.tenant_id);
-  const tenantId = requestedTenantId
-    ? validateUuid(requestedTenantId)
-    : profileTenantId;
+  const profileTenantId = profile.tenant_id
+    ? validateUuid(profile.tenant_id)
+    : null;
+  let tenantId: string;
+  if (requestedTenantId) {
+    tenantId = validateUuid(requestedTenantId);
+  } else if (profileTenantId) {
+    tenantId = profileTenantId;
+  } else {
+    throw new HttpError(
+      403,
+      'TENANT_REQUIRED',
+      'Selecione um cliente antes de conectar o canal.',
+    );
+  }
 
-  if (profile.is_super_admin !== true && tenantId !== profileTenantId) {
+  if (
+    profile.is_super_admin !== true &&
+    (!profileTenantId || tenantId !== profileTenantId)
+  ) {
     throw new HttpError(
       403,
       'TENANT_ACCESS_DENIED',
