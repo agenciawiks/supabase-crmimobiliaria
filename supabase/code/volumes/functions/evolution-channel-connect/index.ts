@@ -618,14 +618,14 @@ async function handleRequest(request: Request): Promise<Response> {
 
       const evolutionUrl = normalizeEvolutionUrl(String(channel.url || ''));
       const instance = validateInstance(String(channel.instance || ''));
-      const needsWebhook = normalizeWebhookUrl(channel.webhook_url) !==
-        normalizeWebhookUrl(WEBHOOK_URL);
+      // A URL stored in the database does not prove the provider still has
+      // the webhook enabled (instances can be reset independently). Reapply
+      // and verify it on every status check so existing channels self-heal.
+      const needsWebhook = true;
       const [stateResult, qrResult, webhookResult] = await Promise.allSettled([
         readEvolutionState(evolutionUrl, apiKey, instance),
         readQrCodeFromEvolution(evolutionUrl, apiKey, instance),
-        needsWebhook
-          ? ensureEvolutionWebhook(evolutionUrl, apiKey, instance)
-          : Promise.resolve(),
+        ensureEvolutionWebhook(evolutionUrl, apiKey, instance),
       ]);
 
       if (stateResult.status === 'rejected') throw stateResult.reason;
@@ -634,7 +634,7 @@ async function handleRequest(request: Request): Promise<Response> {
       const qrCode = providerConnected || qrResult.status === 'rejected'
         ? null
         : qrResult.value;
-      const webhookConfigured = !needsWebhook || webhookResult.status === 'fulfilled';
+      const webhookConfigured = webhookResult.status === 'fulfilled';
       const connected = providerConnected && webhookConfigured;
       const nextStatus = connected ? 'connected' : 'disconnected';
       if (channel.status !== nextStatus || (needsWebhook && webhookConfigured)) {
