@@ -19,6 +19,7 @@ type ConnectPayload = {
   action?: 'start' | 'status';
   name?: string;
   channelId?: string;
+  tenantId?: string;
 };
 
 type JsonRecord = Record<string, unknown>;
@@ -216,6 +217,61 @@ function evolutionFailure(
   throw new HttpError(502, 'EVOLUTION_ERROR', fallback);
 }
 
+async function resolveAuthorizedTenant(
+  supabase: ReturnType<typeof createClient>,
+  userId: string,
+  requestedTenantId: unknown,
+): Promise<string> {
+  const { data: profile, error: profileError } = await supabase
+    .from('profiles')
+    .select('tenant_id,is_super_admin,is_active')
+    .eq('id', userId)
+    .maybeSingle();
+
+  if (profileError || !profile) {
+    throw new HttpError(
+      403,
+      'PROFILE_NOT_FOUND',
+      'O perfil autenticado não foi encontrado.',
+    );
+  }
+  if (profile.is_active === false) {
+    throw new HttpError(
+      403,
+      'PROFILE_INACTIVE',
+      'Este usuário não está ativo para conectar canais.',
+    );
+  }
+
+  const profileTenantId = validateUuid(profile.tenant_id);
+  const tenantId = requestedTenantId
+    ? validateUuid(requestedTenantId)
+    : profileTenantId;
+
+  if (profile.is_super_admin !== true && tenantId !== profileTenantId) {
+    throw new HttpError(
+      403,
+      'TENANT_ACCESS_DENIED',
+      'Você não possui acesso para conectar canais neste cliente.',
+    );
+  }
+
+  const { data: tenant, error: tenantError } = await supabase
+    .from('tenants')
+    .select('id')
+    .eq('id', tenantId)
+    .maybeSingle();
+  if (tenantError || !tenant) {
+    throw new HttpError(
+      404,
+      'TENANT_NOT_FOUND',
+      'O cliente selecionado não foi encontrado.',
+    );
+  }
+
+  return tenantId;
+}
+
 function normalizeWebhookUrl(value: unknown): string {
   return String(value || '').replace(/\/+$/, '');
 }
@@ -337,7 +393,10 @@ async function ensureEvolutionWebhook(
       body: JSON.stringify({
         enabled: true,
         url: WEBHOOK_URL,
+        webhookByEvents: false,
+        webhookBase64: false,
         events: [
+          'CONNECTION_UPDATE',
           'MESSAGES_UPSERT',
           'MESSAGES_UPDATE',
           'SEND_MESSAGE_UPDATE',
@@ -346,7 +405,6 @@ async function ensureEvolutionWebhook(
           'GROUP_PARTICIPANTS_UPDATE',
         ],
         headers: {},
-        base64: false,
       }),
     },
   );
@@ -500,13 +558,14 @@ async function handleRequest(request: Request): Promise<Response> {
       );
     }
 
-    const tenantId = validateUuid(
-      user.app_metadata?.tenant_id ||
-        user.user_metadata?.tenant_id,
-    );
     const payload = (await request.json().catch(() => null)) as
       | ConnectPayload
       | null;
+    const tenantId = await resolveAuthorizedTenant(
+      supabase,
+      user.id,
+      payload?.tenantId,
+    );
     const action = payload?.action || 'start';
 
     if (action === 'status') {
